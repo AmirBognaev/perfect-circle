@@ -791,8 +791,10 @@ function startDraw() {
   }
   playerName = name;
   document.getElementById('playerBadge').textContent = '👤 ' + name;
-  setupCanvas();
   show('drawScreen');
+  // Wait two animation frames so the browser has fully laid out drawScreen
+  // before we measure canvas size — otherwise getBoundingClientRect returns 0.
+  requestAnimationFrame(() => requestAnimationFrame(() => setupCanvas()));
 }
 
 // ── Canvas / Drawing ──────────────────────────────────────
@@ -801,25 +803,29 @@ const ctx    = canvas.getContext('2d');
 let drawing = false;
 let pts     = [];
 let canvasReady = false;
+let _canvasEventsBound = false;   // FIX: module-level flag (not a property on a boolean)
 
 function setupCanvas() {
-  // Use actual displayed size so canvas internal coords = screen coords (1:1).
-  // window.innerHeight can be larger than the canvas CSS height in Telegram Mini App
-  // (the header eats space), which caused drawn circles to be stored as tall ovals.
-  const rect    = canvas.getBoundingClientRect();
-  canvas.width  = Math.round(rect.width  || window.innerWidth);
-  canvas.height = Math.round(rect.height || window.innerHeight);
+  // Use offsetWidth/offsetHeight — these reflect the CSS layout size reliably
+  // once the element is visible, unlike getBoundingClientRect which can return 0
+  // if called before the first paint.
+  const tg = window.Telegram?.WebApp;
+  const w  = canvas.offsetWidth  || window.innerWidth;
+  // On Telegram Mini App the viewport stable height is the safest height source.
+  const h  = canvas.offsetHeight || (tg?.viewportStableHeight) || window.innerHeight;
+  canvas.width  = Math.round(w);
+  canvas.height = Math.round(h);
   canvasReady = true;
   resetCanvas();
 
-  if (!canvasReady._bound) {
+  if (!_canvasEventsBound) {
+    _canvasEventsBound = true;
     canvas.addEventListener('touchstart', onTS, {passive:false});
     canvas.addEventListener('touchmove',  onTM, {passive:false});
     canvas.addEventListener('touchend',   onTE, {passive:false});
     canvas.addEventListener('mousedown',  e => { const p = toCanvasPos(e.clientX, e.clientY); onStart(p.x, p.y); });
     canvas.addEventListener('mousemove',  e => { if(drawing) { const p = toCanvasPos(e.clientX, e.clientY); onMove(p.x, p.y); } });
     canvas.addEventListener('mouseup',    onEnd);
-    canvasReady._bound = true;
   }
 }
 
@@ -829,12 +835,14 @@ function resetCanvas() {
   document.getElementById('drawInstruction').style.opacity = '1';
 }
 
-// Convert viewport coords → canvas-local coords (handles CSS scaling + Telegram header offset)
+// Convert viewport coords → canvas-local coords.
+// Because canvas.width == canvas.offsetWidth (set in setupCanvas), the scale
+// factor is exactly 1 — we only need to subtract the canvas's top-left position.
 function toCanvasPos(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   return {
-    x: (clientX - rect.left) * (canvas.width  / rect.width),
-    y: (clientY - rect.top)  * (canvas.height / rect.height),
+    x: clientX - rect.left,
+    y: clientY - rect.top,
   };
 }
 
