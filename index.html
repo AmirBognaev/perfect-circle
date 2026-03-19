@@ -812,8 +812,8 @@ function setupCanvas() {
     canvas.addEventListener('touchstart', onTS, {passive:false});
     canvas.addEventListener('touchmove',  onTM, {passive:false});
     canvas.addEventListener('touchend',   onTE, {passive:false});
-    canvas.addEventListener('mousedown',  e => onStart(e.clientX, e.clientY));
-    canvas.addEventListener('mousemove',  e => { if(drawing) onMove(e.clientX,e.clientY); });
+    canvas.addEventListener('mousedown',  e => { const p = toCanvasPos(e.clientX, e.clientY); onStart(p.x, p.y); });
+    canvas.addEventListener('mousemove',  e => { if(drawing) { const p = toCanvasPos(e.clientX, e.clientY); onMove(p.x, p.y); } });
     canvas.addEventListener('mouseup',    onEnd);
     canvasReady._bound = true;
   }
@@ -825,8 +825,17 @@ function resetCanvas() {
   document.getElementById('drawInstruction').style.opacity = '1';
 }
 
-function onTS(e) { e.preventDefault(); onStart(e.touches[0].clientX, e.touches[0].clientY); }
-function onTM(e) { e.preventDefault(); onMove(e.touches[0].clientX, e.touches[0].clientY); }
+// Convert viewport coords → canvas-local coords (handles CSS scaling + Telegram header offset)
+function toCanvasPos(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left) * (canvas.width  / rect.width),
+    y: (clientY - rect.top)  * (canvas.height / rect.height),
+  };
+}
+
+function onTS(e) { e.preventDefault(); const p = toCanvasPos(e.touches[0].clientX, e.touches[0].clientY); onStart(p.x, p.y); }
+function onTM(e) { e.preventDefault(); const p = toCanvasPos(e.touches[0].clientX, e.touches[0].clientY); onMove(p.x, p.y); }
 function onTE(e) { e.preventDefault(); onEnd(); }
 
 function onStart(x,y) {
@@ -906,14 +915,13 @@ function onEnd() {
 }
 
 // ════════════════════════════════════════════════════════════
-// ── Circle Scoring  (3 independent algorithms combined) ────
+// ── Circle Scoring  ─────────────────────────────────────────
 // ════════════════════════════════════════════════════════════
 
 /**
- * ALGORITHM 1 — Kasa algebraic least-squares circle fit
- * Finds the circle (cx, cy, r) that minimises Σ(dist_i - r)²
- * by solving a 2×2 linear system in translated coordinates.
- * Much more accurate than centroid-based radius estimation.
+ * Kasa least-squares circle fit — used ONLY for the visual overlay
+ * (the dashed best-fit circle drawn after you finish).
+ * Scoring uses the simpler, stricter centroid method below.
  */
 function fitCircleKasa(pts) {
   const n = pts.length;
@@ -928,96 +936,82 @@ function fitCircleKasa(pts) {
     Suuu += u*u*u; Svvv += v*v*v;
     Suuv += u*u*v; Suvv += u*v*v;
   }
-
   const denom = 2 * (Suu*Svv - Suv*Suv);
   if (Math.abs(denom) < 1e-8) return null;
-
   const uc = (Svv*(Suuu + Suvv) - Suv*(Suuv + Svvv)) / denom;
   const vc = (Suu*(Suuv + Svvv) - Suv*(Suuu + Suvv)) / denom;
-
-  return {
-    cx: uc + mx,
-    cy: vc + my,
-    r:  Math.sqrt(uc*uc + vc*vc + (Suu + Svv) / n),
-  };
+  return { cx: uc + mx, cy: vc + my, r: Math.sqrt(uc*uc + vc*vc + (Suu + Svv) / n) };
 }
 
 /**
- * ALGORITHM 2 — Turn-direction consistency (smoothness)
- * A perfect circle turns CONSISTENTLY in one direction the whole way.
- * We compute the cross-product of consecutive segment pairs at a stride
- * that skips over per-point jitter (~1/50th of the total point count).
- * Score = fraction of consecutive turns that share the same sign.
- * Wobbling / hand-tremor causes occasional direction reversals → lower score.
+ * Coverage — what fraction of the full 360° is painted.
+ * Penalises arcs, spirals, unclosed blobs.
  */
-function scoreSmoothness(pts) {
-  const N      = pts.length;
-  const stride = Math.max(4, Math.floor(N / 25)); // ~25 probes — robust to per-point jitter
-  let same = 0, total = 0, prevSign = 0;
-
-  for (let i = stride; i < N - stride; i += stride) {
-    const a = pts[i - stride], b = pts[i], c = pts[i + stride];
-    // 2-D cross product of vectors AB and BC
-    const cross = (b.x-a.x)*(c.y-b.y) - (b.y-a.y)*(c.x-b.x);
-    const s = cross > 0 ? 1 : -1;
-    if (prevSign !== 0) {
-      if (s === prevSign) same++;
-      total++;
-    }
-    prevSign = s;
-  }
-
-  return total > 0 ? same / total : 0.5;
-}
-
-/**
- * ALGORITHM 3 — Angular sector coverage
- * Divides the 360° around the best-fit centre into N sectors
- * and checks how many are visited. Penalises arcs and spirals.
- */
-function scoreCoverage(pts, circle) {
+function scoreCoverage(pts, cx, cy) {
   const SECTORS = 72; // 5° each
   const filled  = new Set();
   for (const p of pts) {
-    const a = Math.atan2(p.y - circle.cy, p.x - circle.cx);
+    const a = Math.atan2(p.y - cy, p.x - cx);
     filled.add(Math.floor(((a + Math.PI) / (2 * Math.PI)) * SECTORS) % SECTORS);
   }
   return filled.size / SECTORS;
 }
 
 /**
- * MAIN SCORER — combines all three algorithms
+ * MAIN SCORER
+ *
+ * Idea: a perfect circle has ALL points at the SAME distance from the centre.
+ * We measure how much the radii vary (coefficient of variation = std/mean).
+ * A perfect circle → CV = 0 → score = 100.
+ * An oval, blob, or wobbly mess → CV is high → score drops fast.
+ *
+ * Three components:
+ *   ① Roundness  (65%) — how equal all radii are  (CV method, strict)
+ *   ② Coverage   (20%) — did you go all the way around?
+ *   ③ Closure    (15%) — did you close the circle?
+ *
+ * A power curve (^1.5) compresses mid-range scores downward so
+ * "pretty okay" drawings score 50–65, not 80+.
  */
 function calcScore(pts) {
-  const circle = fitCircleKasa(pts);
-  if (!circle || circle.r < 25) return { total: 0, roundness: 0, smoothness: 0, coverage: 0, closure: 0, _circle: null };
+  const n = pts.length;
 
-  // ① Roundness: RMS deviation from the Kasa best-fit circle, normalised by radius
-  const devs      = pts.map(p => Math.hypot(p.x - circle.cx, p.y - circle.cy) - circle.r);
-  const rms       = Math.sqrt(devs.reduce((s,d) => s+d*d, 0) / devs.length);
-  const roundness = Math.max(0, 1 - (rms / circle.r) * 3.5);
+  // Centroid
+  let cx = 0, cy = 0;
+  for (const p of pts) { cx += p.x; cy += p.y; }
+  cx /= n; cy /= n;
 
-  // ② Smoothness: curvature consistency via circumradius sampling
-  const smoothness = scoreSmoothness(pts);
+  // Radii from centroid
+  const radii  = pts.map(p => Math.hypot(p.x - cx, p.y - cy));
+  const meanR  = radii.reduce((s, r) => s + r, 0) / n;
+  if (meanR < 25) return { total: 0, roundness: 0, coverage: 0, closure: 0, _circle: null };
 
-  // ③ Coverage: angular completeness around best-fit centre
-  const coverage = scoreCoverage(pts, circle);
+  const stdR   = Math.sqrt(radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / n);
+  const cv     = stdR / meanR; // 0 = perfect circle
 
-  // ④ Closure: how close are start and end points (as % of diameter)
-  const closeDist = Math.hypot(pts[pts.length-1].x - pts[0].x, pts[pts.length-1].y - pts[0].y);
-  const closure   = Math.max(0, 1 - closeDist / (circle.r * 2.0));
+  // ① Roundness: CV=0 → 1.0,  CV=0.10 → 0.60,  CV=0.25 → 0
+  const roundness = Math.max(0, 1 - cv * 4);
 
-  // Weighted composite (must sum to 1.0)
-  const raw   = roundness*0.55 + smoothness*0.20 + coverage*0.15 + closure*0.10;
-  const total = Math.max(0, Math.min(100, Math.round(raw * 100)));
+  // ② Coverage: fraction of 360° covered
+  const coverage = scoreCoverage(pts, cx, cy);
+
+  // ③ Closure: gap between first and last point vs diameter
+  const gap     = Math.hypot(pts[n-1].x - pts[0].x, pts[n-1].y - pts[0].y);
+  const closure = Math.max(0, 1 - gap / (meanR * 2));
+
+  // Weighted composite + power curve (makes high scores truly hard)
+  const raw   = roundness * 0.65 + coverage * 0.20 + closure * 0.15;
+  const total = Math.max(0, Math.min(100, Math.round(Math.pow(raw, 1.5) * 100)));
+
+  // Visual circle: use Kasa for the overlay (it draws tighter)
+  const kasaCircle = fitCircleKasa(pts) || { cx, cy, r: meanR };
 
   return {
     total,
-    roundness:  Math.round(roundness  * 100),
-    smoothness: Math.round(smoothness * 100),
-    coverage:   Math.round(coverage   * 100),
-    closure:    Math.round(closure    * 100),
-    _circle: circle,
+    roundness: Math.round(roundness * 100),
+    coverage:  Math.round(coverage  * 100),
+    closure:   Math.round(closure   * 100),
+    _circle:   kasaCircle,
   };
 }
 
@@ -1062,10 +1056,9 @@ function showResult(result) {
 
   // ── Subscore breakdown ───────────────────────────────────
   const subscores = [
-    { label: '🎯 Форма',     val: result.roundness,  tip: 'Kasa least-squares fit' },
-    { label: '✨ Плавность', val: result.smoothness, tip: 'кривизна по хордам' },
-    { label: '🔄 Полнота',   val: result.coverage,   tip: 'охват 360°' },
-    { label: '🔒 Замыкание', val: result.closure,    tip: 'начало ↔ конец' },
+    { label: '🎯 Форма',     val: result.roundness, tip: 'насколько все точки одинаково далеко от центра' },
+    { label: '🔄 Полнота',   val: result.coverage,  tip: 'закрыл ли ты весь круг 360°' },
+    { label: '🔒 Замыкание', val: result.closure,   tip: 'насколько близко начало и конец' },
   ];
 
   document.getElementById('breakdown').innerHTML = subscores.map(s => {
@@ -1087,8 +1080,8 @@ function showResult(result) {
     });
   }, 120);
 
-  // Confetti for high scores
-  if (score >= 85) spawnConfetti(score >= 95 ? 80 : 40);
+  // Confetti for high scores (harder to get now)
+  if (score >= 80) spawnConfetti(score >= 92 ? 80 : 40);
 
   // Haptic feedback
   if (tg?.HapticFeedback) {
