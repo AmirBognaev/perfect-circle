@@ -803,8 +803,12 @@ let pts     = [];
 let canvasReady = false;
 
 function setupCanvas() {
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
+  // Use actual displayed size so canvas internal coords = screen coords (1:1).
+  // window.innerHeight can be larger than the canvas CSS height in Telegram Mini App
+  // (the header eats space), which caused drawn circles to be stored as tall ovals.
+  const rect    = canvas.getBoundingClientRect();
+  canvas.width  = Math.round(rect.width  || window.innerWidth);
+  canvas.height = Math.round(rect.height || window.innerHeight);
   canvasReady = true;
   resetCanvas();
 
