@@ -855,12 +855,14 @@ function onStart(x,y) {
   pts = [{x,y}];
   document.getElementById('drawInstruction').style.opacity = '0';
   ctx.clearRect(0,0,canvas.width,canvas.height);
+  startDrawSound();
 }
 
 function onMove(x,y) {
   if (!drawing) return;
   const prev = pts[pts.length-1];
   pts.push({x,y});
+  updateDrawSound(x, y);
   // Rainbow glow trail
   const hue = (pts.length * 1.5) % 360;
   ctx.save();
@@ -879,6 +881,7 @@ function onMove(x,y) {
 function onEnd() {
   if (!drawing) return;
   drawing = false;
+  stopDrawSound();
 
   if (pts.length < 30) {
     document.getElementById('drawInstruction').style.opacity = '1';
@@ -925,6 +928,194 @@ function onEnd() {
     showResult(result);
   }, 750);
 }
+
+// ════════════════════════════════════════════════════════════
+// ── Audio Engine  (Web Audio API, zero external files)  ─────
+// ════════════════════════════════════════════════════════════
+
+let _ac = null;
+function getAC() {
+  if (!_ac) _ac = new (window.AudioContext || window.webkitAudioContext)();
+  if (_ac.state === 'suspended') _ac.resume();
+  return _ac;
+}
+
+// ── Satisfying button click: soft downward-sweeping pop ──────
+function playClick() {
+  try {
+    const ctx = getAC(), t = ctx.currentTime;
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(680, t);
+    osc.frequency.exponentialRampToValueAtTime(320, t + 0.07);
+    gain.gain.setValueAtTime(0.16, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.10);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(t); osc.stop(t + 0.11);
+  } catch(_) {}
+}
+
+// ── Pencil scratch while drawing ─────────────────────────────
+let _dSrc = null, _dGain = null, _dFilter = null, _dLastPt = null;
+
+function startDrawSound() {
+  stopDrawSound();
+  try {
+    const ctx = getAC();
+    const sr  = ctx.sampleRate;
+    // 0.5 s white-noise buffer, looped
+    const buf = ctx.createBuffer(1, sr >> 1, sr);
+    const d   = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+
+    _dSrc = ctx.createBufferSource();
+    _dSrc.buffer = buf;
+    _dSrc.loop   = true;
+
+    // Band-pass filter gives the pencil-on-paper texture
+    _dFilter = ctx.createBiquadFilter();
+    _dFilter.type            = 'bandpass';
+    _dFilter.frequency.value = 3400;
+    _dFilter.Q.value         = 0.55;
+
+    _dGain = ctx.createGain();
+    _dGain.gain.setValueAtTime(0, ctx.currentTime);
+    _dGain.gain.linearRampToValueAtTime(0.07, ctx.currentTime + 0.05);
+
+    _dSrc.connect(_dFilter);
+    _dFilter.connect(_dGain);
+    _dGain.connect(ctx.destination);
+    _dSrc.start();
+  } catch(_) {}
+}
+
+// Modulate volume + filter frequency with drawing speed
+function updateDrawSound(x, y) {
+  if (!_dGain || !_dFilter) return;
+  try {
+    const ctx   = getAC(), t = ctx.currentTime;
+    const speed = _dLastPt ? Math.hypot(x - _dLastPt.x, y - _dLastPt.y) : 8;
+    _dLastPt    = { x, y };
+    const vol   = Math.min(0.12, 0.035 + speed * 0.007);  // louder when fast
+    const freq  = 2800 + Math.min(speed * 40, 2400);       // brighter when fast
+    _dGain.gain.setTargetAtTime(vol,  t, 0.025);
+    _dFilter.frequency.setTargetAtTime(freq, t, 0.025);
+  } catch(_) {}
+}
+
+function stopDrawSound() {
+  try {
+    if (_dGain) {
+      const ctx = getAC(), t = ctx.currentTime;
+      _dGain.gain.setTargetAtTime(0, t, 0.04);
+      const src = _dSrc;
+      setTimeout(() => { try { src.stop(); } catch(_) {} }, 250);
+    }
+  } catch(_) {}
+  _dSrc = null; _dGain = null; _dFilter = null; _dLastPt = null;
+}
+
+// ── Choir crowd effect: multiple detuned "vocal" voices ──────
+// happy=true → ascending "УРА!" cheer,  happy=false → groaning "уууу…"
+function playChoir(happy) {
+  try {
+    const ctx  = getAC(), t = ctx.currentTime;
+    const base = happy ? 280 : 220;         // base pitch
+    const VOICES = 7;
+    for (let i = 0; i < VOICES; i++) {
+      const detune = (i - Math.floor(VOICES / 2)) * 18; // spread ±54 cents
+      const o  = ctx.createOscillator();
+      const g  = ctx.createGain();
+      const lp = ctx.createBiquadFilter();   // low-pass to soften "voice" tone
+
+      o.type   = 'sawtooth';  // richer than sine → more "vocal"
+      lp.type  = 'lowpass';
+      lp.frequency.value = 1100;
+
+      if (happy) {
+        // Pitch shoots up — "Уррааа!" shape
+        o.frequency.setValueAtTime(base + detune, t);
+        o.frequency.linearRampToValueAtTime((base + detune) * 1.55, t + 0.22);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.045, t + 0.06);   // quick attack
+        g.gain.setValueAtTime(0.045, t + 0.18);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+        o.start(t); o.stop(t + 0.6);
+      } else {
+        // Pitch slides down — "уууу…" groan
+        o.frequency.setValueAtTime((base + detune) * 1.15, t);
+        o.frequency.linearRampToValueAtTime(base + detune - 30, t + 0.45);
+        g.gain.setValueAtTime(0.04, t);
+        g.gain.setValueAtTime(0.04, t + 0.3);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
+        o.start(t); o.stop(t + 0.7);
+      }
+
+      o.connect(lp); lp.connect(g); g.connect(ctx.destination);
+    }
+  } catch(_) {}
+}
+
+// ── Score reveal: tone mood matches the result ───────────────
+function playScoreSound(score) {
+  try {
+    const ctx = getAC(), t = ctx.currentTime;
+
+    if (score >= 88) {
+      // 🎉 Legendary — ascending arpeggio THEN happy choir cheer
+      [523, 659, 784, 1047].forEach((f, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'sine'; o.frequency.value = f;
+        g.gain.setValueAtTime(0, t + i * 0.085);
+        g.gain.linearRampToValueAtTime(0.13, t + i * 0.085 + 0.03);
+        g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.085 + 0.28);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(t + i * 0.085); o.stop(t + i * 0.085 + 0.3);
+      });
+      // Choir bursts in after the arpeggio
+      setTimeout(() => playChoir(true), 360);
+
+    } else if (score >= 70) {
+      // 😊 Good — warm two-note chime
+      [494, 622].forEach((f, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'sine'; o.frequency.value = f;
+        g.gain.setValueAtTime(0.12, t + i * 0.1);
+        g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.1 + 0.35);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(t + i * 0.1); o.stop(t + i * 0.1 + 0.38);
+      });
+
+    } else if (score >= 40) {
+      // 😐 Meh — neutral mid tone
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = 370;
+      g.gain.setValueAtTime(0.10, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t); o.stop(t + 0.4);
+
+    } else {
+      // 💀 Bad — sad two notes + disappointed choir groan
+      [311, 233].forEach((f, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'sine'; o.frequency.value = f;
+        g.gain.setValueAtTime(0.10, t + i * 0.13);
+        g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.13 + 0.3);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(t + i * 0.13); o.stop(t + i * 0.13 + 0.33);
+      });
+      // Choir groans after the sad notes
+      setTimeout(() => playChoir(false), 300);
+    }
+  } catch(_) {}
+}
+
+// ── Wire click sound to every button / tab tap ───────────────
+document.addEventListener('pointerdown', e => {
+  if (e.target.closest('.btn, .tab, .lb-back')) playClick();
+}, { passive: true });
 
 // ════════════════════════════════════════════════════════════
 // ── Circle Scoring  ─────────────────────────────────────────
@@ -1084,6 +1275,8 @@ const REACTIONS = [
 
 function showResult(result) {
   const score = result.total;
+  playScoreSound(score);
+
   const rx = REACTIONS.find(x => score <= x.max) || REACTIONS[REACTIONS.length-1];
 
   document.getElementById('resEmoji').textContent = rx.e;
