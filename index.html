@@ -132,6 +132,34 @@
     input[type=text].shake {
       animation: shake 0.4s ease;
     }
+    input[type=text].bad-name {
+      border-color: #f43f5e !important;
+      box-shadow: 0 0 0 3px rgba(244,63,94,0.25) !important;
+    }
+
+    .name-err {
+      max-width: 280px;
+      width: 100%;
+      background: rgba(244, 63, 94, 0.10);
+      border: 1px solid rgba(244, 63, 94, 0.30);
+      border-radius: 10px;
+      padding: 9px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #fb7185;
+      text-align: center;
+      line-height: 1.4;
+      margin-top: -4px;
+      margin-bottom: 2px;
+      opacity: 0;
+      transform: translateY(-8px);
+      pointer-events: none;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .name-err.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
 
     @keyframes shake {
       0%,100% { transform: translateX(0); }
@@ -542,6 +570,7 @@
     <div class="hero-tagline">Нарисуй максимально<br>идеальный круг</div>
   </div>
   <input type="text" id="nameInput" placeholder="Введи своё имя" maxlength="20" autocomplete="off" />
+  <div class="name-err" id="nameErr"></div>
   <button class="btn btn-primary" onclick="startDraw()">✏️ Нарисовать круг!</button>
   <button class="btn btn-secondary" onclick="openLeaderboard()">🏆 Таблица рекордов</button>
   <div class="sigma-badge">✦ <span>Sigma Circle Labs™</span> · результаты могут расстроить</div>
@@ -787,6 +816,108 @@ function show(id) {
 // Auto-start on load
 startBgAnim();
 
+// ════════════════════════════════════════════════════════════
+// ── Profanity Filter ────────────────────────────────────────
+// ════════════════════════════════════════════════════════════
+// Strategy: root/stem-based checking beats giant word lists.
+// Russian has 30-80 conjugations per root — we store ~20 Cyrillic
+// stems and catch them all with a simple .includes() after normalising
+// the input (removes spaces, maps lookalike chars, collapses repeats).
+// English + Russian-in-Latin transliteration checked separately.
+
+// ── Cyrillic stems ───────────────────────────────────────────
+const _BAD_CYR = [
+  // хуй family (хуйня, нахуй, охуеть, захуй …)
+  'хуй','хуе','хуя','хуи','хую',
+  // пизда family (пиздец, пиздить, пиздануть …)
+  'пизд',
+  // ёб family — use ё (different letter from е!) to avoid catching
+  // surnames like "Лебанов" which contain "ебан" with plain е.
+  // Real mat uses ё: ёбаный, ёбнуть, ёбарь etc.
+  'ёбан','ёбну','ёбар','ёбла',
+  // е-forms: use specific compound words unlikely to appear in real names
+  'еблан','ёбнут',
+  // бля family (блядь, блятина …)
+  'блят','бляд',
+  // others
+  'шлюх','залуп','дроч',
+  'мудак','мудил',
+  'пидор','пидар','педик',
+  // racial slurs — include both doubled and collapsed forms
+  // (normCyr collapses repeats: 'нигга'→'нига', 'ниггер'→'нигер')
+  'нигга','нига','ниггер','нигер',
+];
+
+// ── Latin stems (English profanity + Russian transliteration) ─
+const _BAD_LAT = [
+  // Russian mat in Latin letters
+  'huy','hui','khuy','pizd',
+  'eban','ebat','ebnut','eblan',
+  'blya','blyad','shlukh','zalup',
+  'mudak','pidor','pidar','pedik','droch',
+  // English profanity
+  'fuck','fuq','fuk','fck',
+  'shit','shyt',
+  'cunt','bitch','btch',
+  'cock','nigger','nigga','nigg',
+  'pussy','whore','slut',
+  'asshole','dickhead',
+];
+
+// Latin lookalikes → Cyrillic (key troll trick: "xуй" with Latin x)
+const _L2C = {a:'а',e:'е',o:'о',x:'х',y:'у',c:'с',p:'р'};
+// Number / symbol substitutions
+const _N2L = {'0':'о','3':'з','@':'а','1':'и','4':'ч','!':'и'};
+
+/** Normalise to Cyrillic: strip spaces, expand subs, map Latin lookalikes,
+ *  collapse repeated chars so "хуууй" → "хуй" */
+function _normCyr(s) {
+  return s.toLowerCase()
+    .replace(/\s/g, '')
+    .replace(/[0-9@!]/g, c => _N2L[c] || c)
+    .replace(/[aeoxycpAEOXYCP]/g, c => _L2C[c.toLowerCase()] || c)
+    .replace(/(.)\1+/g, '$1');           // collapse any run of same char to one
+}
+
+/** Normalise to plain Latin: expand number subs first, then keep only ASCII letters */
+function _normLat(s) {
+  return s.toLowerCase()
+    .replace(/0/g,'o').replace(/1/g,'i').replace(/3/g,'e')
+    .replace(/5/g,'s').replace(/@/g,'a').replace(/4/g,'a')
+    .replace(/[^a-z]/g,'');
+}
+
+// Exact-match whitelist for normalized Latin forms that contain a profane
+// substring but are legitimate words / surnames
+const _LAT_WHITELIST = new Set([
+  'cockerell','cockatoo','cocktail','cockney','peacock',
+  'hancock','babcock','laycock','adcock','hitchcock',
+  'scunthorpe','shitake', // "shiitake" mushroom typo variant
+]);
+
+function _hasProfanity(name) {
+  const cyr = _normCyr(name);
+  const lat = _normLat(name);
+  if (_LAT_WHITELIST.has(lat)) return false;
+  return _BAD_CYR.some(r => cyr.includes(r)) ||
+         _BAD_LAT.some(r => lat.includes(r));
+}
+
+// ── Funny rejection messages (shown in the red badge) ────────
+const _CENSOR_MSGS = [
+  '🤚 Стоп, стоп! Мама видит все рекорды — введи другое имя',
+  '🛡️ Цензор сработал! Это имя не для приличного общества',
+  '🧼 Имя требует мыла. Попробуй что-нибудь почище',
+  '😅 Sigma Circle — игра для всех. Включая твою маму 👀',
+  '🤖 Sigma Bot не согласен. Другое имя, пожалуйста',
+  '👮 Полиция никнеймов не дремлет. Попробуй снова!',
+  '🙈 Бабушка увидит это в таблице — введи нормальное имя',
+  '🚨 Отдел имён отклонил заявку. Следующий, пожалуйста',
+  '🫣 Ой-ой! Придумай имя, которое можно показать в школе',
+  '🎓 Наш фильтр получил диплом — и он говорит: не-а',
+];
+
+// ════════════════════════════════════════════════════════════
 // ── Name Screen ───────────────────────────────────────────
 // Pre-fill from Telegram
 if (tg?.initDataUnsafe?.user) {
@@ -799,14 +930,38 @@ document.getElementById('nameInput').addEventListener('keydown', e => {
 });
 
 function startDraw() {
-  const name = document.getElementById('nameInput').value.trim();
+  const inp  = document.getElementById('nameInput');
+  const err  = document.getElementById('nameErr');
+  const name = inp.value.trim();
+
+  // ── Empty name ────────────────────────────────────────────
   if (!name) {
-    const inp = document.getElementById('nameInput');
     inp.classList.add('shake');
     setTimeout(() => inp.classList.remove('shake'), 400);
     inp.focus();
     return;
   }
+
+  // ── Profanity check ───────────────────────────────────────
+  if (_hasProfanity(name)) {
+    const msg = _CENSOR_MSGS[Math.floor(Math.random() * _CENSOR_MSGS.length)];
+    err.textContent = msg;
+    err.classList.add('visible');
+    inp.classList.add('shake', 'bad-name');
+    setTimeout(() => inp.classList.remove('shake'), 400);
+    inp.value = '';
+    inp.focus();
+    // Auto-hide after 4 s; also clear the red border
+    setTimeout(() => {
+      err.classList.remove('visible');
+      inp.classList.remove('bad-name');
+    }, 4000);
+    return;
+  }
+
+  // ── All clear: proceed ────────────────────────────────────
+  err.classList.remove('visible');
+  inp.classList.remove('bad-name');
   playerName = name;
   document.getElementById('playerBadge').textContent = '👤 ' + name;
   show('drawScreen');
