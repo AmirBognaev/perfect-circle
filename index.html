@@ -288,9 +288,26 @@
       font-size: 14px;
       color: var(--muted);
       text-align: center;
-      margin-bottom: 22px;
+      margin-bottom: 10px;
       animation: slideUp 0.4s 0.3s ease both;
     }
+
+    .percentile-badge {
+      font-size: 13px;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 16px;
+      padding: 6px 16px;
+      border-radius: 20px;
+      background: rgba(108, 99, 255, 0.15);
+      border: 1px solid rgba(108, 99, 255, 0.35);
+      color: #a78bfa;
+      letter-spacing: 0.3px;
+      min-height: 28px;
+      animation: slideUp 0.4s 0.35s ease both;
+      transition: opacity 0.3s;
+    }
+    .percentile-badge.loading { opacity: 0.4; }
 
     @keyframes slideUp {
       from { opacity: 0; transform: translateY(14px); }
@@ -554,6 +571,7 @@
   <div class="breakdown" id="breakdown"></div>
   <div class="result-title" id="resTitle">Отлично!</div>
   <div class="result-sub" id="resSub">Неплохая рука!</div>
+  <div class="percentile-badge loading" id="percentileBadge">📊 Считаем твой рейтинг…</div>
   <div class="btn-row">
     <button class="btn btn-secondary" onclick="tryAgain()">🔄 Ещё раз</button>
     <button class="btn btn-primary" onclick="openLeaderboard()">🏆 Рекорды</button>
@@ -1245,9 +1263,11 @@ function calcScore(pts) {
   const gap     = Math.hypot(pts[n - 1].x - pts[0].x, pts[n - 1].y - pts[0].y);
   const closure = Math.max(0, 1 - gap / (meanR * 2));
 
-  // Weighted composite — no power curve, calibration handled by CV multiplier
+  // Weighted composite — no power curve, calibration handled by CV multiplier.
+  // Store 1 decimal place (e.g. 89.2) so two players with similar circles
+  // can still have different scores and the leaderboard has fewer ties.
   const raw   = roundness * 0.65 + coverage * 0.20 + closure * 0.15;
-  const total = Math.max(0, Math.min(100, Math.round(raw * 100)));
+  const total = Math.max(0, Math.min(100, Math.round(raw * 1000) / 10));
 
   const circle = kasa || { cx, cy, r: meanR };
   return {
@@ -1260,28 +1280,86 @@ function calcScore(pts) {
 }
 
 // ── Result Screen ─────────────────────────────────────────
+// Each tier has multiple variants — one is picked at random each time
 const REACTIONS = [
-  { max:15,  e:'💀', t:'Это что вообще?!',        s:'Геометрия плачет' },
-  { max:30,  e:'🥴', t:'Ну… стараешься!',         s:'Похоже на картошку' },
-  { max:45,  e:'😂', t:'Смелая попытка!',         s:'Может, следующий будет лучше?' },
-  { max:58,  e:'😅', t:'Почти яйцо',              s:'Но мы верим в тебя!' },
-  { max:70,  e:'🙂', t:'Неплохо!',                s:'Твоя рука уже греется' },
-  { max:80,  e:'😊', t:'Хорошо!',                 s:'Уверенная рука!' },
-  { max:88,  e:'😎', t:'Очень хорошо!',           s:'Прирождённый художник' },
-  { max:94,  e:'🤩', t:'Великолепно!',            s:'Почти идеально!' },
-  { max:98,  e:'🔥', t:'Невероятно!',             s:'Ты серьёзно нарисовал это пальцем?!' },
-  { max:100, e:'🎉', t:'ИДЕАЛЬНЫЙ КРУГ!!!',       s:'Срочно скриншот! Ты легенда!' },
+  { max: 15, e: '💀', v: [
+    { t: 'Это что вообще?!',           s: 'Геометрия плачет в углу' },
+    { t: 'Рисовал локтем?',            s: 'Квадрат бы вышел лучше' },
+    { t: 'Занятная картошка',          s: 'Дали бы оценил' },
+    { t: 'Это был эксперимент?',       s: 'Евклид перевернулся в гробу' },
+    { t: 'Такое специально не нарисуешь', s: 'Уникальное произведение' },
+  ]},
+  { max: 30, e: '🥴', v: [
+    { t: 'Ну… стараешься!',            s: 'Похоже на картошку' },
+    { t: 'Видели хуже. Честно.',       s: 'В параллельной вселенной это круг' },
+    { t: 'Оригинальная трактовка',     s: 'Пикассо одобряет' },
+    { t: 'Что-то круглообразное',      s: 'Примерно круг, если прищуриться' },
+  ]},
+  { max: 45, e: '😂', v: [
+    { t: 'Смелая попытка!',            s: 'Следующий будет лучше!' },
+    { t: 'Это овал? Или яйцо?',        s: 'Нет, мы серьёзно спрашиваем' },
+    { t: 'Геометрия — не твой конёк',  s: 'Зато характер есть!' },
+    { t: 'Круг с характером',          s: 'Почти подходит под определение' },
+  ]},
+  { max: 58, e: '😅', v: [
+    { t: 'Почти яйцо',                 s: 'Но мы верим в тебя!' },
+    { t: 'Полукруг-полуовал',          s: 'Назовём это «кровал»' },
+    { t: 'Уже теплее!',               s: 'Рука только разогревается' },
+    { t: 'Неплохо, но можно лучше',    s: 'Немного практики и всё получится' },
+  ]},
+  { max: 70, e: '🙂', v: [
+    { t: 'Неплохо!',                   s: 'Рука уже греется' },
+    { t: 'Вполне достойно!',           s: 'С каждым разом лучше' },
+    { t: 'Приличный круг!',            s: 'Хорошая основа для роста' },
+    { t: 'Так держать!',              s: 'Ещё немного тренировок' },
+  ]},
+  { max: 80, e: '😊', v: [
+    { t: 'Хорошо!',                    s: 'Уверенная рука!' },
+    { t: 'Это реально круто!',         s: 'Явно не первый раз' },
+    { t: 'Руки из правильного места!', s: 'Так держать' },
+    { t: 'Сильный результат!',         s: 'Уже лучше большинства' },
+  ]},
+  { max: 88, e: '😎', v: [
+    { t: 'Очень хорошо!',              s: 'Прирождённый художник' },
+    { t: 'Красавчик!',                 s: 'Циркуль нервно курит в сторонке' },
+    { t: 'Вот это рука!',             s: 'Циркуль тебя уважает' },
+    { t: 'Топ-результат!',            s: 'Немногие доходят до таких высот' },
+  ]},
+  { max: 94, e: '🤩', v: [
+    { t: 'Великолепно!',              s: 'Почти идеально!' },
+    { t: 'Мастер круга!',             s: 'Циркуль плачет от зависти' },
+    { t: 'Это почти совершенство!',   s: 'Явно тренировался годами' },
+    { t: 'Сигма-рука!',               s: 'Ты в элите. Буквально.' },
+  ]},
+  { max: 99, e: '🔥', v: [
+    { t: 'Невероятно!',               s: 'Пальцем? Серьёзно?!' },
+    { t: 'Легенда среди кругов!',     s: 'Расскажи свой секрет' },
+    { t: 'Ты обманул физику!',        s: 'Руки созданы для кругов' },
+    { t: 'Такое в природе не бывает!', s: 'Мы проверяли. Дважды.' },
+  ]},
+  { max: 100, e: '⭕', v: [
+    { t: 'ИДЕАЛЬНЫЙ КРУГ!!!',         s: 'Срочно скриншот — ты легенда!' },
+    { t: '100.0. МЫ В ШОКЕ.',         s: 'Циркуль уволился. Ты его заменил.' },
+    { t: 'Совершенство существует!',  s: 'И это ты. Прямо сейчас.' },
+  ]},
 ];
 
 function showResult(result) {
   const score = result.total;
   playScoreSound(score);
 
-  const rx = REACTIONS.find(x => score <= x.max) || REACTIONS[REACTIONS.length-1];
+  // Pick a random text variant for this score tier
+  const rx = REACTIONS.find(x => score <= x.max) || REACTIONS[REACTIONS.length - 1];
+  const v  = rx.v[Math.floor(Math.random() * rx.v.length)];
 
   document.getElementById('resEmoji').textContent = rx.e;
-  document.getElementById('resTitle').textContent = rx.t;
-  document.getElementById('resSub').textContent   = rx.s;
+  document.getElementById('resTitle').textContent = v.t;
+  document.getElementById('resSub').textContent   = v.s;
+
+  // Reset percentile badge while we fetch
+  const pb = document.getElementById('percentileBadge');
+  pb.textContent = '📊 Считаем твой рейтинг…';
+  pb.className   = 'percentile-badge loading';
 
   // Color ring by score (red→yellow→green)
   const hue = Math.round(score * 1.2);
@@ -1291,14 +1369,38 @@ function showResult(result) {
 
   show('resultScreen');
 
-  // Animate main counter
+  // Animate main counter — counts up to one decimal place
   const el = document.getElementById('scoreNum');
   let cur = 0;
   const interval = setInterval(() => {
     cur = Math.min(cur + score / 50, score);
-    el.textContent = Math.round(cur);
+    el.textContent = cur >= score ? score.toFixed(1) : Math.floor(cur);
     if (cur >= score) clearInterval(interval);
   }, 16);
+
+  // Fetch percentile from Supabase asynchronously
+  fetchPercentile(score).then(pct => {
+    const pb = document.getElementById('percentileBadge');
+    if (pct === null) {
+      pb.style.display = 'none';
+      return;
+    }
+    pb.classList.remove('loading');
+    pb.style.display = '';
+    if (pct >= 95) {
+      pb.textContent = `🏆 Ты в топ ${100 - pct}% игроков — это элита!`;
+    } else if (pct >= 80) {
+      pb.textContent = `🔥 Ты лучше, чем ${pct}% игроков!`;
+    } else if (pct >= 60) {
+      pb.textContent = `😎 Ты лучше, чем ${pct}% игроков`;
+    } else if (pct >= 40) {
+      pb.textContent = `💪 Ты обошёл ${pct}% участников`;
+    } else if (pct >= 20) {
+      pb.textContent = `📈 Ты лучше, чем ${pct}% игроков — есть куда расти!`;
+    } else {
+      pb.textContent = `🌱 Только ${pct}% ниже тебя — начало пути!`;
+    }
+  });
 
   // ── Subscore breakdown ───────────────────────────────────
   const subscores = [
@@ -1333,6 +1435,25 @@ function showResult(result) {
   if (tg?.HapticFeedback) {
     tg.HapticFeedback.notificationOccurred(score >= 80 ? 'success' : score >= 50 ? 'warning' : 'error');
   }
+}
+
+/**
+ * Returns the percentile of `score` among all scores in Supabase.
+ * E.g. 72 means this score beats 72% of all scores.
+ * Returns null if Supabase is unavailable or fewer than 5 scores exist.
+ */
+async function fetchPercentile(score) {
+  if (!sb) return null;
+  try {
+    const [resBelow, resTotal] = await Promise.all([
+      sb.from('scores').select('*', { count: 'exact', head: true }).lt('score', score),
+      sb.from('scores').select('*', { count: 'exact', head: true }),
+    ]);
+    const below = resBelow.count ?? 0;
+    const total = resTotal.count ?? 0;
+    if (total < 5) return null; // not enough data for a meaningful percentile
+    return Math.round((below / total) * 100);
+  } catch(_) { return null; }
 }
 
 function tryAgain() {
@@ -1442,7 +1563,7 @@ function renderGlobal(rows) {
         <div class="lb-name">${esc(r.name)}${r.name===playerName?' 👈 ты':''}</div>
         <div class="lb-date">${fmtDate(r.created_at)}</div>
       </div>
-      <div class="lb-score">${r.score}</div>
+      <div class="lb-score">${Number(r.score).toFixed(1)}</div>
     </div>
   `).join('');
 }
@@ -1461,7 +1582,7 @@ function renderPersonal() {
         <div class="lb-name">${esc(r.name)}</div>
         <div class="lb-date">${r.date || ''}</div>
       </div>
-      <div class="lb-score">${r.score}</div>
+      <div class="lb-score">${Number(r.score).toFixed(1)}</div>
     </div>
   `).join('');
 }
