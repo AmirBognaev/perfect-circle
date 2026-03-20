@@ -999,7 +999,7 @@ function startDrawSound() {
 
     _dGain = ctx.createGain();
     _dGain.gain.setValueAtTime(0, ctx.currentTime);
-    _dGain.gain.linearRampToValueAtTime(0.07, ctx.currentTime + 0.05);
+    _dGain.gain.linearRampToValueAtTime(0.049, ctx.currentTime + 0.05); // -30% volume
 
     _dSrc.connect(_dFilter);
     _dFilter.connect(_dGain);
@@ -1015,7 +1015,7 @@ function updateDrawSound(x, y) {
     const ctx   = getAC(), t = ctx.currentTime;
     const speed = _dLastPt ? Math.hypot(x - _dLastPt.x, y - _dLastPt.y) : 8;
     _dLastPt    = { x, y };
-    const vol   = Math.min(0.12, 0.035 + speed * 0.007);  // louder when fast
+    const vol   = Math.min(0.084, 0.024 + speed * 0.005);  // louder when fast, -30% overall
     const freq  = 2800 + Math.min(speed * 40, 2400);       // brighter when fast
     _dGain.gain.setTargetAtTime(vol,  t, 0.025);
     _dFilter.frequency.setTargetAtTime(freq, t, 0.025);
@@ -1379,27 +1379,81 @@ function showResult(result) {
   }, 16);
 
   // Fetch percentile from Supabase asynchronously
-  fetchPercentile(score).then(pct => {
+  fetchPercentile(score).then(({ pct, total }) => {
     const pb = document.getElementById('percentileBadge');
-    if (pct === null) {
-      pb.style.display = 'none';
-      return;
-    }
+    if (pct === null) { pb.style.display = 'none'; return; }
     pb.classList.remove('loading');
     pb.style.display = '';
-    if (pct >= 95) {
-      pb.textContent = `🏆 Ты в топ ${100 - pct}% игроков — это элита!`;
+    const top = 100 - pct; // "top X%" = rarer
+    let msgs;
+
+    if (pct >= 99) {
+      // "you beat 99% of players" — absolute top
+      msgs = [
+        `👑 Топ 1%! Таких единицы во всей игре`,
+        `🏆 Лучше 99% игроков — это называется мастерство`,
+        `🔮 Топ 1% — ты буквально лучший`,
+      ];
+    } else if (pct >= 95) {
+      msgs = [
+        `🏆 Топ ${top}%! Почти никто не доходит до этого`,
+        `🥇 Ты в топ ${top}% — редкий результат`,
+        `🔥 Лучше ${pct}% всех игроков! Это элита`,
+      ];
     } else if (pct >= 80) {
-      pb.textContent = `🔥 Ты лучше, чем ${pct}% игроков!`;
+      msgs = [
+        `🔥 Ты лучше, чем ${pct}% игроков!`,
+        `🎯 В топ ${top}% — серьёзный уровень`,
+        `😍 ${pct}% игроков остались позади!`,
+        `💥 Топ ${top}% — так держать!`,
+      ];
     } else if (pct >= 60) {
-      pb.textContent = `😎 Ты лучше, чем ${pct}% игроков`;
+      msgs = [
+        `😎 Лучше ${pct}% участников — выше среднего`,
+        `💪 ${pct}% игроков позади тебя`,
+        `📈 Ты обошёл ${pct}% всех, кто играл`,
+        `✨ Выше большинства — ${pct}% уже позади`,
+      ];
     } else if (pct >= 40) {
-      pb.textContent = `💪 Ты обошёл ${pct}% участников`;
-    } else if (pct >= 20) {
-      pb.textContent = `📈 Ты лучше, чем ${pct}% игроков — есть куда расти!`;
+      msgs = [
+        `🙂 Ты обошёл ${pct}% игроков`,
+        `💫 Уверенная середина — ${pct}% позади`,
+        `👍 Лучше, чем ${pct}% участников`,
+        `📊 ${pct}% игроков набрали меньше тебя`,
+      ];
+    } else if (pct >= 15) {
+      msgs = [
+        `📈 ${pct}% игроков уже позади — расти дальше!`,
+        `💡 Лучше, чем ${pct}% — есть куда стремиться`,
+        `🌱 ${pct}% ниже тебя, впереди ещё много`,
+        `🎯 ${pct}% позади — продолжай тренироваться!`,
+      ];
+    } else if (pct >= 1) {
+      msgs = [
+        `🌱 ${pct}% участников ниже тебя — начало пути!`,
+        `💪 ${pct}% уже позади — тренируйся и обгоняй!`,
+        `🎮 ${pct}% набрали меньше — всё только начинается`,
+      ];
     } else {
-      pb.textContent = `🌱 Только ${pct}% ниже тебя — начало пути!`;
+      // pct === 0: nobody in DB scored less — two possible reasons:
+      // A) score is genuinely high and all DB scores are high too (unusual)
+      // B) score is low and DB has few matching entries
+      if (score >= 70) {
+        msgs = [
+          `🚀 Один из первых с таким счётом — рекорды впереди!`,
+          `🏆 Редкий результат — база данных только пополняется`,
+          `✨ Мало с кем сравнивать — ты среди лучших`,
+        ];
+      } else {
+        msgs = [
+          `🌱 Первые шаги — тренируйся и обгоняй всех!`,
+          `💡 Все вверх — следующий круг лучше!`,
+          `🎯 Начало пути! Скоро будешь в топе`,
+        ];
+      }
     }
+
+    pb.textContent = msgs[Math.floor(Math.random() * msgs.length)];
   });
 
   // ── Subscore breakdown ───────────────────────────────────
@@ -1443,7 +1497,7 @@ function showResult(result) {
  * Returns null if Supabase is unavailable or fewer than 5 scores exist.
  */
 async function fetchPercentile(score) {
-  if (!sb) return null;
+  if (!sb) return { pct: null };
   try {
     const [resBelow, resTotal] = await Promise.all([
       sb.from('scores').select('*', { count: 'exact', head: true }).lt('score', score),
@@ -1451,9 +1505,9 @@ async function fetchPercentile(score) {
     ]);
     const below = resBelow.count ?? 0;
     const total = resTotal.count ?? 0;
-    if (total < 5) return null; // not enough data for a meaningful percentile
-    return Math.round((below / total) * 100);
-  } catch(_) { return null; }
+    if (total < 5) return { pct: null };  // not enough data for a meaningful percentile
+    return { pct: Math.round((below / total) * 100), total };
+  } catch(_) { return { pct: null }; }
 }
 
 function tryAgain() {
@@ -1540,7 +1594,7 @@ async function loadLb(tab) {
       .from('scores')
       .select('name, score, created_at')
       .order('score', { ascending: false })
-      .limit(25);
+      .limit(100);
     if (error) throw error;
     renderGlobal(data || []);
   } catch(e) {
@@ -1563,7 +1617,7 @@ function renderGlobal(rows) {
         <div class="lb-name">${esc(r.name)}${r.name===playerName?' 👈 ты':''}</div>
         <div class="lb-date">${fmtDate(r.created_at)}</div>
       </div>
-      <div class="lb-score">${Number(r.score).toFixed(1)}</div>
+      <div class="lb-score">${fmtScore(r.score)}</div>
     </div>
   `).join('');
 }
@@ -1582,12 +1636,14 @@ function renderPersonal() {
         <div class="lb-name">${esc(r.name)}</div>
         <div class="lb-date">${r.date || ''}</div>
       </div>
-      <div class="lb-score">${Number(r.score).toFixed(1)}</div>
+      <div class="lb-score">${fmtScore(r.score)}</div>
     </div>
   `).join('');
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Show integer scores as "92", decimal scores as "89.2" — no pointless ".0"
+function fmtScore(s) { const n = Number(s); return Number.isInteger(n) ? String(n) : n.toFixed(1); }
 function fmtDate(iso) {
   if (!iso) return '';
   try { return new Date(iso).toLocaleDateString('ru',{day:'numeric',month:'short'}); } catch { return ''; }
