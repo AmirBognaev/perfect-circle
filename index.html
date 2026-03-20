@@ -931,9 +931,37 @@ function onEnd() {
 // ════════════════════════════════════════════════════════════
 
 /**
- * Kasa least-squares circle fit — used ONLY for the visual overlay
- * (the dashed best-fit circle drawn after you finish).
- * Scoring uses the simpler, stricter centroid method below.
+ * Resample a polyline to `n` uniformly-spaced points by arc length.
+ * This eliminates touch-sampling-rate bias: slow segments produce many raw
+ * points, fast segments produce few — resampling gives each part equal weight.
+ */
+function resampleByArcLength(pts, n) {
+  const dists = [0];
+  for (let i = 1; i < pts.length; i++) {
+    dists.push(dists[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  }
+  const totalLen = dists[dists.length - 1];
+  if (totalLen < 1) return pts;
+  const result = [];
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    const target = (i / (n - 1)) * totalLen;
+    while (j < dists.length - 2 && dists[j + 1] < target) j++;
+    const span = dists[j + 1] - dists[j];
+    const t    = span > 0 ? (target - dists[j]) / span : 0;
+    result.push({
+      x: pts[j].x + t * (pts[j + 1].x - pts[j].x),
+      y: pts[j].y + t * (pts[j + 1].y - pts[j].y),
+    });
+  }
+  return result;
+}
+
+/**
+ * Kasa least-squares circle fit.
+ * Finds the circle that minimises the sum of squared algebraic distances.
+ * Used for BOTH the visual overlay AND scoring — it finds the true geometric
+ * centre regardless of point density along the stroke.
  */
 function fitCircleKasa(pts) {
   const n = pts.length;
@@ -970,60 +998,73 @@ function scoreCoverage(pts, cx, cy) {
 }
 
 /**
- * MAIN SCORER
+ * MAIN SCORER  — v3 (Kasa-centre + arc-length resampling)
  *
- * Idea: a perfect circle has ALL points at the SAME distance from the centre.
- * We measure how much the radii vary (coefficient of variation = std/mean).
- * A perfect circle → CV = 0 → score = 100.
- * An oval, blob, or wobbly mess → CV is high → score drops fast.
+ * Root causes of wrong scores that v2 had:
+ *  • Centroid ≠ geometric centre: touch events fire at fixed time intervals,
+ *    so wherever the user draws slowly there are more points; the centroid
+ *    drifts there and every radius looks wrong.  Fix: use Kasa centre.
+ *  • Device sampling-rate bias: 120 Hz ProMotion gives 3× more raw points
+ *    than a 60 Hz device.  Fix: resample to 300 uniform arc-length steps.
+ *  • ^1.5 power curve crushed good scores: raw 0.88 → 82 OK, but after
+ *    centroid bias raw dropped to 0.70 → score only 59.  Fix: no power curve.
  *
- * Three components:
- *   ① Roundness  (65%) — how equal all radii are  (CV method, strict)
- *   ② Coverage   (20%) — did you go all the way around?
- *   ③ Closure    (15%) — did you close the circle?
- *
- * A power curve (^1.5) compresses mid-range scores downward so
- * "pretty okay" drawings score 50–65, not 80+.
+ * New calibration:
+ *   Great human circle  → CV ≈ 0.04 → score 85–93
+ *   Decent circle       → CV ≈ 0.10 → score 65–72
+ *   Oval / wobbly blob  → CV ≈ 0.20 → score 35–45
+ *   Total mess          → CV ≈ 0.30 → score 10–20
  */
 function calcScore(pts) {
   const n = pts.length;
 
-  // Centroid
-  let cx = 0, cy = 0;
-  for (const p of pts) { cx += p.x; cy += p.y; }
-  cx /= n; cy /= n;
+  // ── Step 1: resample to 300 evenly-spaced points ──────────
+  // Eliminates density bias from variable drawing speed / device Hz.
+  const S  = resampleByArcLength(pts, Math.min(n, 300));
+  const sn = S.length;
 
-  // Radii from centroid
-  const radii  = pts.map(p => Math.hypot(p.x - cx, p.y - cy));
-  const meanR  = radii.reduce((s, r) => s + r, 0) / n;
+  // ── Step 2: Kasa least-squares circle fit ─────────────────
+  // Finds the true geometric centre, regardless of point density.
+  const kasa = fitCircleKasa(S);
+
+  // Fallback to centroid if Kasa degenerates (nearly-collinear input)
+  let cx, cy;
+  if (kasa) {
+    cx = kasa.cx; cy = kasa.cy;
+  } else {
+    cx = S.reduce((s, p) => s + p.x, 0) / sn;
+    cy = S.reduce((s, p) => s + p.y, 0) / sn;
+  }
+
+  // ── Step 3: radii from Kasa centre ────────────────────────
+  const radii = S.map(p => Math.hypot(p.x - cx, p.y - cy));
+  const meanR = radii.reduce((s, r) => s + r, 0) / sn;
   if (meanR < 25) return { total: 0, roundness: 0, coverage: 0, closure: 0, _circle: null };
 
-  const stdR   = Math.sqrt(radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / n);
-  const cv     = stdR / meanR; // 0 = perfect circle
+  const stdR = Math.sqrt(radii.reduce((s, r) => s + (r - meanR) ** 2, 0) / sn);
+  const cv   = stdR / meanR; // 0 = perfect circle, higher = worse
 
-  // ① Roundness: CV=0 → 1.0,  CV=0.10 → 0.60,  CV=0.25 → 0
-  const roundness = Math.max(0, 1 - cv * 4);
+  // ① Roundness (65 %): CV=0 → 1.0 | CV=0.10 → 0.55 | CV=0.22+ → 0
+  const roundness = Math.max(0, 1 - cv * 4.5);
 
-  // ② Coverage: fraction of 360° covered
-  const coverage = scoreCoverage(pts, cx, cy);
+  // ② Coverage (20 %): fraction of full 360° that the stroke passes through
+  const coverage = scoreCoverage(S, cx, cy);
 
-  // ③ Closure: gap between first and last point vs diameter
-  const gap     = Math.hypot(pts[n-1].x - pts[0].x, pts[n-1].y - pts[0].y);
+  // ③ Closure (15 %): how close is the end of the stroke to the start
+  const gap     = Math.hypot(pts[n - 1].x - pts[0].x, pts[n - 1].y - pts[0].y);
   const closure = Math.max(0, 1 - gap / (meanR * 2));
 
-  // Weighted composite + power curve (makes high scores truly hard)
+  // Weighted composite — no power curve, calibration handled by CV multiplier
   const raw   = roundness * 0.65 + coverage * 0.20 + closure * 0.15;
-  const total = Math.max(0, Math.min(100, Math.round(Math.pow(raw, 1.5) * 100)));
+  const total = Math.max(0, Math.min(100, Math.round(raw * 100)));
 
-  // Visual circle: use Kasa for the overlay (it draws tighter)
-  const kasaCircle = fitCircleKasa(pts) || { cx, cy, r: meanR };
-
+  const circle = kasa || { cx, cy, r: meanR };
   return {
     total,
     roundness: Math.round(roundness * 100),
     coverage:  Math.round(coverage  * 100),
     closure:   Math.round(closure   * 100),
-    _circle:   kasaCircle,
+    _circle:   circle,
   };
 }
 
