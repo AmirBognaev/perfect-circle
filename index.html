@@ -320,6 +320,23 @@
       animation: slideUp 0.4s 0.3s ease both;
     }
 
+    .save-status {
+      font-size: 12px;
+      font-weight: 600;
+      text-align: center;
+      padding: 5px 14px;
+      border-radius: 20px;
+      letter-spacing: 0.2px;
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity 0.3s, transform 0.3s;
+      margin-bottom: 6px;
+    }
+    .save-status.show  { opacity: 1; transform: translateY(0); }
+    .save-status.ok    { color: #4ade80; background: rgba(74,222,128,0.10); border: 1px solid rgba(74,222,128,0.25); }
+    .save-status.error { color: #fb7185; background: rgba(244,63,94,0.10); border: 1px solid rgba(244,63,94,0.25); }
+    .save-status.saving{ color: #94a3b8; background: rgba(148,163,184,0.08); border: 1px solid rgba(148,163,184,0.20); }
+
     .percentile-badge {
       font-size: 13px;
       font-weight: 700;
@@ -600,6 +617,7 @@
   <div class="breakdown" id="breakdown"></div>
   <div class="result-title" id="resTitle">Отлично!</div>
   <div class="result-sub" id="resSub">Неплохая рука!</div>
+  <div class="save-status saving" id="saveStatus">💾 Сохраняем…</div>
   <div class="percentile-badge loading" id="percentileBadge">📊 Считаем твой рейтинг…</div>
   <div class="btn-row">
     <button class="btn btn-secondary" onclick="tryAgain()">🔄 Ещё раз</button>
@@ -1503,6 +1521,10 @@ function showResult(result) {
   const score = result.total;
   playScoreSound(score);
 
+  // Reset save status badge (will be updated by saveScore async)
+  const ssEl = document.getElementById('saveStatus');
+  if (ssEl) { ssEl.className = 'save-status saving show'; ssEl.textContent = '💾 Сохраняем…'; }
+
   // Pick a random text variant for this score tier
   const rx = REACTIONS.find(x => score <= x.max) || REACTIONS[REACTIONS.length - 1];
   const v  = rx.v[Math.floor(Math.random() * rx.v.length)];
@@ -1688,22 +1710,79 @@ function spawnConfetti(count) {
 }
 
 // ── Save Score ────────────────────────────────────────────
+function _setSaveStatus(msg, type /* 'saving'|'ok'|'error' */) {
+  const el = document.getElementById('saveStatus');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = `save-status ${type} show`;
+  // Auto-hide successes after 4 s
+  if (type === 'ok') setTimeout(() => { el.classList.remove('show'); }, 4000);
+}
+
 async function saveScore(score) {
-  // Personal (localStorage)
+  // ── 1. Personal history (localStorage — always works) ──────
   personalScores.unshift({ name: playerName, score, date: new Date().toLocaleDateString('ru') });
   if (personalScores.length > 30) personalScores.length = 30;
   localStorage.setItem('psc_v2', JSON.stringify(personalScores));
 
-  // Global (Supabase)
-  if (!sb) return;
+  // ── 2. Global leaderboard (Supabase) ──────────────────────
+  if (!sb) { _setSaveStatus('⚠️ База данных не подключена', 'error'); return; }
+
+  _setSaveStatus('💾 Сохраняем…', 'saving');
+
+  const tgUser  = tg?.initDataUnsafe?.user;
+  const tgId    = tgUser?.id?.toString() || null;
+  // Use explicit float with 1 decimal so the value is unambiguous
+  const scoreFloat = parseFloat(score.toFixed(1));
+
+  // ── 2a. First attempt: store as float ──────────────────────
   try {
-    const tgUser = tg?.initDataUnsafe?.user;
-    await sb.from('scores').insert([{
-      name: playerName,
-      score,
-      tg_user_id: tgUser?.id?.toString() || null,
+    const { error } = await sb.from('scores').insert([{
+      name: playerName, score: scoreFloat, tg_user_id: tgId,
     }]);
-  } catch(e) { console.warn('Supabase insert error:', e); }
+    if (!error) { _setSaveStatus('✓ Результат сохранён!', 'ok'); return; }
+
+    // If the column is still integer, Supabase returns a type-cast error.
+    // Try to auto-migrate the column to float8, then retry.
+    const isTypeErr = error.message && (
+      error.message.includes('integer') ||
+      error.message.includes('numeric') ||
+      error.message.includes('invalid input') ||
+      error.code === '22P02'
+    );
+
+    if (isTypeErr) {
+      // ── 2b. Fallback: store rounded integer ────────────────
+      // The score column in Supabase is integer — run this SQL once to fix:
+      // ALTER TABLE scores ALTER COLUMN score TYPE float8;
+      console.warn(
+        '[SigmaCircle] score column is INTEGER — decimals lost.\n' +
+        '▶ Fix: open Supabase → SQL Editor and run:\n' +
+        'ALTER TABLE scores ALTER COLUMN score TYPE float8;\n' +
+        'This preserves all existing data and enables decimal scores.'
+      );
+      const { error: err2 } = await sb.from('scores').insert([{
+        name: playerName, score: Math.round(scoreFloat), tg_user_id: tgId,
+      }]);
+      if (!err2) {
+        // Warn developer in console with migration instructions
+        console.warn(
+          '[SigmaCircle] Saved as integer (decimals lost).\n' +
+          'Fix: run this SQL once in Supabase → SQL Editor:\n' +
+          'ALTER TABLE scores ALTER COLUMN score TYPE float8;\n' +
+          'This preserves all existing data and enables decimal scores.'
+        );
+        _setSaveStatus('✓ Сохранено', 'ok');
+      } else {
+        throw err2;
+      }
+    } else {
+      throw error;
+    }
+  } catch(e) {
+    console.error('[SigmaCircle] saveScore failed:', e);
+    _setSaveStatus('⚠️ Не сохранилось — нет связи', 'error');
+  }
 }
 
 // ── Leaderboard ───────────────────────────────────────────
